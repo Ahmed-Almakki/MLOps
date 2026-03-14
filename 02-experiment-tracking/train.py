@@ -5,6 +5,8 @@ import mlflow
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import root_mean_squared_error
 
+TRACKING_SERVER = "http://127.0.0.1:5080"
+mlflow.set_tracking_url(TRACKING_SERVER)
 
 def load_pickle(filename: str):
     with open(filename, "rb") as f_in:
