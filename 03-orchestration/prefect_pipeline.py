@@ -247,7 +247,7 @@ def registerModel(model_run_id, model_name="best_model") -> None:
         raise e
 
 
-@flow(name="NYC Taxi Orchestrator", tags=["production", "machine-learning", "scheduled"])
+@flow(name="NYC Taxi Orchestrator")
 def main_pipeline():
     logger = get_run_logger()
     file_path = "../02-experiment-tracking/data/green_tripdata_2023-01.parquet"
