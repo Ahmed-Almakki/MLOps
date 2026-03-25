@@ -15,7 +15,7 @@ from sklearn.model_selection import train_test_split, cross_val_score
 EXPERIMENT_NAME = "RandomForestPrefect"
 mlflow.set_tracking_uri("http://127.0.0.1:5000")
 mlflow.set_experiment(EXPERIMENT_NAME)
-
+client = MlflowClient()
 
 
 def load_data(path: str) -> pd.DataFrame:
@@ -53,7 +53,6 @@ def firstTrain(X_train: pd.DataFrame, Y_train: np.ndarray) -> None:
             mlflow.sklearn.autolog()
 
             model = RandomForestRegressor(**params, random_state=42)
-            # model.fit(X_train, Y_train)
 
             # Perform 5-Fold Cross Validation. 
             # n_jobs=-1 tells it to use all your CPU cores to speed it up.
@@ -92,8 +91,10 @@ def firstTrain(X_train: pd.DataFrame, Y_train: np.ndarray) -> None:
             rstate=rstate,
         )
 
-def evaluation(name, x_test):
-    client = MlflowClient()
+def evaluation(name: str, x_test: pd.DataFrame, y_test: np.ndarray, x_train: pd.DataFrame, y_train: np.ndarray):
+    """
+    Evaluate the top 5 models and choose the best one 
+    """
     experiment = client.get_experiment_by_name(name)
 
     runs = client.search_runs(
@@ -105,44 +106,74 @@ def evaluation(name, x_test):
     valid_runs = [r for r in runs if "rmse" in r.data.metrics]
 
     top_5_runs = valid_runs[:5]
-    best_run_id = None
-    best_metric = float('inf')
+    best_test_rmse = float('inf')
+    ultimate_best_model = None
+    ultimate_best_params = None
 
-    for run in top_5_runs:
-        run_id = run.info.run_id
-        model_uri = f"runs:/{run_id}/model" 
+    run_name = f"Final_Eval_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
+    with mlflow.start_run(run_name=run_name):
+        for run in top_5_runs:
+            params = run.data.params
 
-        model = mlflow.sklearn.load_model(model_uri)
-        
-        # Evaluate on the unseen test data
-        y_pred = model.predict(x_test)
-        test_rmse = root_mean_squared_error(y_test, y_pred)
-        
-        cv_rmse = run.data.metrics['cv_mean_rmse']
-        print(f"Run {run_id[:8]} | CV RMSE: {cv_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
+            # Convert string params back to proper types
+            n_estimators = int(float(params['n_estimators']))
+            max_depth = int(float(params['max_depth']))
+            min_samples_split = int(float(params['min_samples_split']))
+            min_weight_fraction_leaf = float(params['min_weight_fraction_leaf'])
+            bootstrap = params['bootstrap'].lower() == 'true'
 
-        # Track the absolute best performer on the test set
-        if test_rmse < best_test_rmse:
-            best_test_rmse = test_rmse
-            ultimate_best_run_id = run_id
+            model = RandomForestRegressor(
+                n_estimators=n_estimators, max_depth=max_depth, 
+                min_samples_split=min_samples_split, 
+                min_weight_fraction_leaf=min_weight_fraction_leaf,
+                bootstrap=bootstrap, random_state=42
+            )
+            model.fit(x_train, y_train)
 
-    print(f"\n🏆 Ultimate Winner: Run {ultimate_best_run_id} (Test RMSE: {best_test_rmse:.4f})")
+            
+            # Evaluate on the unseen test data
+            y_pred = model.predict(x_test)
+            test_rmse = root_mean_squared_error(y_test, y_pred)
+            
+            # cv_rmse = run.data.metrics['cv_mean_rmse']
+            # print(f"Run {run_id[:8]} | CV RMSE: {cv_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
 
-    # 5. The Cleanup Phase (Garbage Collection)
-    print("\n--- Commencing Cleanup ---")
+            # Track the absolute best performer on the test set
+            if test_rmse < best_test_rmse:
+                best_test_rmse = test_rmse
+                ultimate_best_model = model
+                ultimate_best_params = params
+
+        mlflow.log_params(ultimate_best_params)
+        mlflow.log_metric("final_test_rmse", best_test_rmse)
+        mlflow.sklearn.log_model(ultimate_best_model, artifact_path="best_rf_model")
+
+        best_run_id = mlflow.active_run().info.run_id
+
     deleted_count = 0
     
-    for run in all_runs:
-        # If the run is NOT our ultimate winner, delete it!
-        if run.info.run_id != ultimate_best_run_id:
+    for run in valid_runs:
+        if run.info.run_id != best_run_id:
             client.delete_run(run.info.run_id)
             deleted_count += 1
-            
-    print(f"Cleanup complete. Deleted {deleted_count} rejected runs.")
-    print("Only the best model remains in your MLflow database and artifacts folder!")
     
-    return ultimate_best_run_id
+    return best_run_id
 
+
+def registerModel(model_run_id, model_name="best_model") -> None:
+    """
+    Register the Choosen Model and return it's parameter
+    """
+    model_uri = f"runs:/{model_run_id}/best_rf_model"
+
+    register_model = mlflow.register_model(model_uri=model_uri, name=model_name)
+
+    # Optional but recommended: Tag it as your production model using an alias
+    client.set_registered_model_alias(
+        name=model_name, 
+        alias="production", 
+        version=register_model.version
+    )
 
 
 def main_pipeline():
@@ -151,8 +182,12 @@ def main_pipeline():
     print("data loaded successfully")
     x, y = process_data(df)
     print("data have been processed succussfully")
-    best_params = firstTrain(x, y)
-    print(f"best params: {best_params}")
+    x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42)
+    firstTrain(x_train, y_train)
+    print(f"best params")
+    model_id = evaluation(EXPERIMENT_NAME, x_test, y_test, x_train, y_train)
+    registerModel(model_id)
+
     
 
 main_pipeline()
