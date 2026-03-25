@@ -6,8 +6,9 @@ from hyperopt.pyll import scope
 import mlflow
 from mlflow.tracking import MlflowClient
 import numpy as np
+import os
 import pandas as pd
-from prefect import flow, task
+from prefect import flow, task, get_run_logger
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -18,31 +19,60 @@ mlflow.set_experiment(EXPERIMENT_NAME)
 client = MlflowClient()
 
 
+@task(description="Loading the data", retries=5, retry_delay_seconds=10)
 def load_data(path: str) -> pd.DataFrame:
     """
     Load data using pandas parquet and just return the first 1000 record becuase of memeory
     """
-    df = pd.read_parquet(path).head(1000)
+    logger = get_run_logger()
+    if not os.path.exists(path):
+        logger.error(f"The File path {path} does not exist")
+        raise FileNotFoundError(f"Missing File: {path}")
+    try:
+        df = pd.read_parquet(path).head(1000)
+        if df.empty:
+            logger.error("The parquet file is empty")
+            raise ValueError("empty file")
+    except Exception as e:
+        logger.error(f"Faild to load parqut file due to: {e}")
+        raise e
+    logger.info(f"Successfully Loaded the dataset {df.shape}")
     return df
 
 
+@task(description="Processing data")
 def process_data(df: pd.DataFrame) -> tuple:
     """
     Clean and exctract usfull data for the model
     """
-    df['PU_DO'] = df['PULocationID'].astype(str) + '_' + df['DOLocationID'].astype(str)
-    df_encoded = pd.get_dummies(df[['PU_DO', 'trip_distance']], columns=['PU_DO'])
-    df_encoded["duration"] = df['lpep_dropoff_datetime'] - df['lpep_pickup_datetime']
-    df_encoded.duration = df_encoded.duration.apply(lambda td: td.total_seconds() / 60)
-    Y = df_encoded.pop("duration")
+    logger = get_run_logger()
+
+    required_columns = ['PULocationID', 'DOLocationID', 'trip_distance', 'lpep_dropoff_datetime', 'lpep_pickup_datetime']
+    for col in required_columns:
+        if col not in df.columns:
+            logger.error(f"Data is missing required column: {col}")
+            raise KeyError(f"Missing column: {col}")
+        
+    try:
+        df['PU_DO'] = df['PULocationID'].astype(str) + '_' + df['DOLocationID'].astype(str)
+        df_encoded = pd.get_dummies(df[['PU_DO', 'trip_distance']], columns=['PU_DO'])
+        df_encoded["duration"] = df['lpep_dropoff_datetime'] - df['lpep_pickup_datetime']
+        df_encoded.duration = df_encoded.duration.apply(lambda td: td.total_seconds() / 60)
+        Y = df_encoded.pop("duration")
+    except Exception as e:
+        logger.error(f"Processing data error due to {e}")
+        raise e
+    logger.info("Processing data and feature engineering and encoding complete.")
     return df_encoded, Y
 
 
-
+@task(description="training data")
 def firstTrain(X_train: pd.DataFrame, Y_train: np.ndarray) -> None:
     """
     Start the first stage of training to exctract the best parameter
     """
+    
+    logger = get_run_logger()
 
     def hyperTrain(params: dict) -> dict:
         """
@@ -50,7 +80,7 @@ def firstTrain(X_train: pd.DataFrame, Y_train: np.ndarray) -> None:
         """
         with mlflow.start_run(nested=True):
             mlflow.set_tag("model", "RandomForset")
-            mlflow.sklearn.autolog()
+            mlflow.log_params(params)
 
             model = RandomForestRegressor(**params, random_state=42)
 
@@ -80,113 +110,166 @@ def firstTrain(X_train: pd.DataFrame, Y_train: np.ndarray) -> None:
 
     rstate = np.random.default_rng(42)
     trails = Trials()
+    try:
+        with mlflow.start_run(run_name="HyperOpt_Optmization"):
+            fmin(
+                fn=hyperTrain,
+                space=space,
+                algo=tpe.suggest,
+                max_evals=15,
+                trials=trails,
+                rstate=rstate,
+            )
+            currently_id = mlflow.active_run().info.run_id
+        logger.info(f"Successfully trained the model with run id of {currently_id}")
+    except Exception as e:
+        logger.error(f"Faild to train due to {e}")
+        raise e
 
-    with mlflow.start_run(run_name="HyperOpt_Optmization"):
-        fmin(
-            fn=hyperTrain,
-            space=space,
-            algo=tpe.suggest,
-            max_evals=15,
-            trials=trails,
-            rstate=rstate,
-        )
 
+@task(description="evaluating models")
 def evaluation(name: str, x_test: pd.DataFrame, y_test: np.ndarray, x_train: pd.DataFrame, y_train: np.ndarray):
     """
     Evaluate the top 5 models and choose the best one 
     """
+    logger = get_run_logger()
+
     experiment = client.get_experiment_by_name(name)
+    if experiment is None:
+        logger.error(f"There is no Experiment by the name {name}")
+        raise ValueError("Wrnog Name")
 
-    runs = client.search_runs(
-        experiment_ids=[experiment.experiment_id],
-        order_by = ["metrics.rmse ASC"]
-    )
+    try:
+        runs = client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            order_by = ["metrics.rmse ASC"]
+        )
 
-    # Ensure we don't accidentally grab the "Parent" run by filtering out runs without the metric
-    valid_runs = [r for r in runs if "rmse" in r.data.metrics]
+        if len(runs) == 0:
+            logger.error(f"No Runs founds in Experiment {experiment}")
+            raise ValueError(f"No Runs Founds in Experiment {experiment}")
 
-    top_5_runs = valid_runs[:5]
-    best_test_rmse = float('inf')
-    ultimate_best_model = None
-    ultimate_best_params = None
+        # Ensure we don't accidentally grab the "Parent" run by filtering out runs without the metric
+        valid_runs = [r for r in runs if "rmse" in r.data.metrics]
 
-    run_name = f"Final_Eval_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
-    with mlflow.start_run(run_name=run_name):
-        for run in top_5_runs:
-            params = run.data.params
+        top_5_runs = valid_runs[:5]
+        best_test_rmse = float('inf')
+        ultimate_best_model = None
+        ultimate_best_params = None
 
-            # Convert string params back to proper types
-            n_estimators = int(float(params['n_estimators']))
-            max_depth = int(float(params['max_depth']))
-            min_samples_split = int(float(params['min_samples_split']))
-            min_weight_fraction_leaf = float(params['min_weight_fraction_leaf'])
-            bootstrap = params['bootstrap'].lower() == 'true'
+        run_name = f"Final_Eval_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
+        with mlflow.start_run(run_name=run_name):
+            for run in top_5_runs:
+                params = run.data.params
+                if len(params) == 0:
+                    logger.error(f"No Parameters Found in run: {run}")
+                    raise ValueError(f"No Parameters Found in run: {run}")
 
-            model = RandomForestRegressor(
-                n_estimators=n_estimators, max_depth=max_depth, 
-                min_samples_split=min_samples_split, 
-                min_weight_fraction_leaf=min_weight_fraction_leaf,
-                bootstrap=bootstrap, random_state=42
-            )
-            model.fit(x_train, y_train)
+                # Convert string params back to proper types
+                n_estimators = int(float(params['n_estimators']))
+                max_depth = int(float(params['max_depth']))
+                min_samples_split = int(float(params['min_samples_split']))
+                min_weight_fraction_leaf = float(params['min_weight_fraction_leaf'])
+                bootstrap = params['bootstrap'].lower() == 'true'
 
-            
-            # Evaluate on the unseen test data
-            y_pred = model.predict(x_test)
-            test_rmse = root_mean_squared_error(y_test, y_pred)
-            
-            # cv_rmse = run.data.metrics['cv_mean_rmse']
-            # print(f"Run {run_id[:8]} | CV RMSE: {cv_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
+                model = RandomForestRegressor(
+                    n_estimators=n_estimators, max_depth=max_depth, 
+                    min_samples_split=min_samples_split, 
+                    min_weight_fraction_leaf=min_weight_fraction_leaf,
+                    bootstrap=bootstrap, random_state=42
+                )
+                model.fit(x_train, y_train)
 
-            # Track the absolute best performer on the test set
-            if test_rmse < best_test_rmse:
-                best_test_rmse = test_rmse
-                ultimate_best_model = model
-                ultimate_best_params = params
+                
+                # Evaluate on the unseen test data
+                y_pred = model.predict(x_test)
+                test_rmse = root_mean_squared_error(y_test, y_pred)
+                
+                # cv_rmse = run.data.metrics['cv_mean_rmse']
+                # print(f"Run {run_id[:8]} | CV RMSE: {cv_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
 
-        mlflow.log_params(ultimate_best_params)
-        mlflow.log_metric("final_test_rmse", best_test_rmse)
-        mlflow.sklearn.log_model(ultimate_best_model, artifact_path="best_rf_model")
+                # Track the absolute best performer on the test set
+                if test_rmse < best_test_rmse:
+                    best_test_rmse = test_rmse
+                    ultimate_best_model = model
+                    ultimate_best_params = params
 
-        best_run_id = mlflow.active_run().info.run_id
+            mlflow.log_params(ultimate_best_params)
+            mlflow.log_metric("final_test_rmse", best_test_rmse)
+            mlflow.sklearn.log_model(ultimate_best_model, artifact_path="best_rf_model")
 
-    deleted_count = 0
-    
-    for run in valid_runs:
-        if run.info.run_id != best_run_id:
-            client.delete_run(run.info.run_id)
-            deleted_count += 1
-    
+            best_run_id = mlflow.active_run().info.run_id
+
+        deleted_count = 0
+        
+        for run in valid_runs:
+            if run.info.run_id != best_run_id:
+                client.delete_run(run.info.run_id)
+                deleted_count += 1
+
+        parent_runs = client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            filter_string="tags.mlflow.runName = 'HyperOpt_Optmization'"
+        )
+        for p_run in parent_runs:
+            client.delete_run(p_run.info.run_id)
+
+        logger.info("Successfully Evaluated the models and deleted the others")
+    except Exception as e:
+        logger.error(f"The Evaluation faild due to {e}")
+        raise e    
+    print(f"Evaluating model Succfully model_id {best_run_id}.")
     return best_run_id
 
 
+@task(description="register Model", retries=5, retry_delay_seconds=10)
 def registerModel(model_run_id, model_name="best_model") -> None:
     """
     Register the Choosen Model and return it's parameter
     """
+    logger = get_run_logger()
+    if not model_run_id:
+        logger.error(f"There is No model id {model_run_id}")
+        raise ValueError("No model id")
     model_uri = f"runs:/{model_run_id}/best_rf_model"
+    try:
+        register_model = mlflow.register_model(model_uri=model_uri, name=model_name)
 
-    register_model = mlflow.register_model(model_uri=model_uri, name=model_name)
+        # Optional but recommended: Tag it as your production model using an alias
+        client.set_registered_model_alias(
+            name=model_name, 
+            alias="production", 
+            version=register_model.version
+        )
+        logger.info(f"Successfully Register the model {model_name}")
+    except Exception as e:
+        logger.error(f"Faild to register model due to {e}")
+        raise e
 
-    # Optional but recommended: Tag it as your production model using an alias
-    client.set_registered_model_alias(
-        name=model_name, 
-        alias="production", 
-        version=register_model.version
-    )
 
-
+@flow(name="NYC Taxi Orchestrator", tags=["production", "machine-learning", "scheduled"])
 def main_pipeline():
+    logger = get_run_logger()
     file_path = "../02-experiment-tracking/data/green_tripdata_2023-01.parquet"
+    
+    logger.info("Starting Pipeline...")
     df = load_data(file_path)
-    print("data loaded successfully")
+    
+    logger.info("Processing Data...")
     x, y = process_data(df)
-    print("data have been processed succussfully")
+    
     x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42)
+    
+    logger.info("Executing Hyperopt Training...")
     firstTrain(x_train, y_train)
-    print(f"best params")
+    
+    logger.info("Evaluating and finding best model...")
     model_id = evaluation(EXPERIMENT_NAME, x_test, y_test, x_train, y_train)
+    
+    logger.info("Registering final model...")
     registerModel(model_id)
+    
+    logger.info("Pipeline Complete!")
 
     
 
