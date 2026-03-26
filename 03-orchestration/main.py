@@ -1,7 +1,7 @@
 from prefect import flow
 from prefect_pipeline import *
 
-EXPERIMENT_NAME = "RandomForestPrefect"
+EXPERIMENT_NAME = "RandomForestPrefect_v2"
 mlflow.set_tracking_uri("http://127.0.0.1:5000")
 mlflow.set_experiment(EXPERIMENT_NAME)
 client = MlflowClient(tracking_uri="http://127.0.0.1:5000")
@@ -37,5 +37,5 @@ if __name__ == "__main__":
     main.serve(
         name="taxi_training",
         tags=["ML"],
-        cron="*/2 * * * *"
+        cron="*/3 * * * *"
     )
