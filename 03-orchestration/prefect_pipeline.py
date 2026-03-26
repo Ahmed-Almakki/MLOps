@@ -13,10 +13,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split, cross_val_score
 
-EXPERIMENT_NAME = "RandomForestPrefect"
-mlflow.set_tracking_uri("http://127.0.0.1:5000")
-mlflow.set_experiment(EXPERIMENT_NAME)
-client = MlflowClient()
+
 
 
 @task(description="Loading the data", retries=5, retry_delay_seconds=10)
@@ -128,7 +125,7 @@ def firstTrain(X_train: pd.DataFrame, Y_train: np.ndarray) -> None:
 
 
 @task(description="evaluating models")
-def evaluation(name: str, x_test: pd.DataFrame, y_test: np.ndarray, x_train: pd.DataFrame, y_train: np.ndarray):
+def evaluation(name: str, x_test: pd.DataFrame, y_test: np.ndarray, x_train: pd.DataFrame, y_train: np.ndarray, client):
     """
     Evaluate the top 5 models and choose the best one 
     """
@@ -223,7 +220,7 @@ def evaluation(name: str, x_test: pd.DataFrame, y_test: np.ndarray, x_train: pd.
 
 
 @task(description="register Model", retries=5, retry_delay_seconds=10)
-def registerModel(model_run_id, model_name="best_model") -> None:
+def registerModel(client, model_run_id, model_name="best_model") -> None:
     """
     Register the Choosen Model and return it's parameter
     """
@@ -245,32 +242,3 @@ def registerModel(model_run_id, model_name="best_model") -> None:
     except Exception as e:
         logger.error(f"Faild to register model due to {e}")
         raise e
-
-
-@flow(name="NYC Taxi Orchestrator")
-def main_pipeline():
-    logger = get_run_logger()
-    file_path = "../02-experiment-tracking/data/green_tripdata_2023-01.parquet"
-    
-    logger.info("Starting Pipeline...")
-    df = load_data(file_path)
-    
-    logger.info("Processing Data...")
-    x, y = process_data(df)
-    
-    x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42)
-    
-    logger.info("Executing Hyperopt Training...")
-    firstTrain(x_train, y_train)
-    
-    logger.info("Evaluating and finding best model...")
-    model_id = evaluation(EXPERIMENT_NAME, x_test, y_test, x_train, y_train)
-    
-    logger.info("Registering final model...")
-    registerModel(model_id)
-    
-    logger.info("Pipeline Complete!")
-
-    
-
-main_pipeline()
