@@ -1,3 +1,1 @@
-# 01-intro
-
-##MLops
+# MLOPS
