@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasource:
+  - name: Postgres
+    type: postgres
+    # the reason of writting db because for grafana the url is just like "localhost, google.com, etc..", 
+    # grafana simply tells the OS system to connect to this url and becuase grafana working inside docker it foes to the db:5432
+    # becuase if it go to localhost:5432 it well mention her self and well not find the database
+    url: db:5432
+    database: monitoring
+    user: ahmed
+    secureJsonData:
+      password: 1138
+    jsonData:
+      sslmode: disable

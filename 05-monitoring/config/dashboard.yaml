@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: 'Evidently Dashboard'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: false
+    options:
+    # this is the path where we will put our dashboard json files, in the docker compose file we will inject this path into grafana
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

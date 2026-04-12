@@ -5,11 +5,13 @@ services:
         image: postgres:17.9
         restart: always
         ports:
-            - 5432:5432
+            - 5433:5432
         environment:
             POSTGRES_USER: ahmed
             POSTGRES_PASSWORD: 1138
             POSTGRES_DB: monitoring
+        volumes:
+            - postgres_data:/var/lib/postgresql/data # where postgres save its raw database files
 
     adminer:
         image: adminer:standalone
@@ -18,3 +20,25 @@ services:
             - 8080:8080
 
     grafana:
+        image: grafana/grafana-oss:latest
+        ports:
+            - 3000:3000
+        restart: unless-stopped
+        depends_on:
+            - db
+        # in order to connect grafana to postgres, we need to set the following environment variables
+        environment:
+            GF_DATABASE_TYPE: postgres
+            GF_DATABASE_HOST: db:5432
+            GF_DATABASE_NAME: monitoring
+            GF_DATABASE_USER: ahmed
+            GF_DATABASE_PASSWORD: 1138
+        volumes:
+            - grafana_data:/var/lib/grafana # where grafana save its raw data files, with this evry time docker restatrt grafana can remember you and everything you did in it
+            - ./config/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml  # injects the datasource configuration file into grafana, this file tell grafana how to connect to our postgres database
+            - ./config/dashboard.yaml:/etc/grafana/provisioning/dashboards/dashboard.yaml   # injects the dashboard configuration file into grafana, this file tell grafana where to find our dashboard json files
+            - ./dashboards:/var/lib/grafana/dashboards # this is the path where we will put our dashboard json files, with this evry time docker restatrt grafana can remember the dashboards you created in it
+    
+volumes:
+    postgres_data:
+    grafana_data:
