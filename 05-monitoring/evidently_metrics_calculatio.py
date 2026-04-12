@@ -10,10 +10,16 @@ import psycopg
 import joblib
 
 from prefect import task, flow
+from prefect.cache_policies import NO_CACHE
 
-from evidently.report import Report
-from evidently import ColumnMapping
-from evidently.metrics import ColumnDriftMetric, DatasetDriftMetric, DatasetMissingValuesMetric
+# from evidently import Report
+# from evidently import DataDefinition
+# from evidently.metrics import ColumnDriftMetric, DatasetDriftMetric, DatasetMissingValuesMetric
+# The updated imports for Evidently 0.7+
+from evidently.legacy.report import Report
+from evidently.legacy.pipeline.column_mapping import ColumnMapping
+from evidently.legacy.metrics import ColumnDriftMetric, DatasetDriftMetric, DatasetMissingValuesMetric
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
 
@@ -54,20 +60,21 @@ report = Report(metrics = [
 
 @task
 def prep_db():
-	with psycopg.connect("host=localhost port=5432 user=ahmed password=1138", autocommit=True) as conn:
-		res = conn.execute("SELECT 1 FROM pg_database WHERE datname='test'")
+	with psycopg.connect("host=localhost port=5433 dbname=monitoring user=ahmed password=1138", autocommit=True) as conn:
+		res = conn.execute("SELECT 1 FROM pg_database WHERE datname='monitoring'")
 		if len(res.fetchall()) == 0:
-			conn.execute("create database test;")
-		with psycopg.connect("host=localhost port=5432 dbname=test user=ahmed password=1138") as conn:
+			conn.execute("create database monitoring;")
+		with psycopg.connect("host=localhost port=5433 dbname=monitoring user=ahmed password=1138") as conn:
 			conn.execute(create_table_statement)
 
-@task
+@task(cache_policy=NO_CACHE)
 def calculate_metrics_postgresql(curr, i):
 	current_data = raw_data[(raw_data.lpep_pickup_datetime >= (begin + datetime.timedelta(i))) &
 		(raw_data.lpep_pickup_datetime < (begin + datetime.timedelta(i + 1)))]
 
 	#current_data.fillna(0, inplace=True)
-	current_data['prediction'] = model.predict(current_data[num_features + cat_features].fillna(0))
+	expected_features = model.feature_names_in_
+	current_data['prediction'] = model.predict(current_data[expected_features].fillna(0))
 
 	report.run(reference_data = reference_data, current_data = current_data,
 		column_mapping=column_mapping)
@@ -87,7 +94,7 @@ def calculate_metrics_postgresql(curr, i):
 def batch_monitoring_backfill():
 	prep_db()
 	last_send = datetime.datetime.now() - datetime.timedelta(seconds=10)
-	with psycopg.connect("host=localhost port=5432 dbname=test user=postgres password=example", autocommit=True) as conn:
+	with psycopg.connect("host=localhost port=5433 dbname=monitoring user=ahmed password=1138", autocommit=True) as conn:
 		for i in range(0, 27):
 			with conn.cursor() as curr:
 				calculate_metrics_postgresql(curr, i)
