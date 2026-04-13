@@ -27,12 +27,15 @@ services:
         depends_on:
             - db
         # in order to connect grafana to postgres, we need to set the following environment variables
-        environment:
-            GF_DATABASE_TYPE: postgres
-            GF_DATABASE_HOST: db:5432
-            GF_DATABASE_NAME: monitoring
-            GF_DATABASE_USER: ahmed
-            GF_DATABASE_PASSWORD: 1138
+        # environment:
+        #     GF_DATABASE_TYPE: postgres
+        #     GF_DATABASE_HOST: db:5432
+        #     GF_DATABASE_NAME: monitoring
+        #     GF_DATABASE_USER: ahmed
+        #     GF_DATABASE_PASSWORD: 1138
+
+        # when we use the grafan envromental varailbe here we make grafana save its all internal system files in the db, we should let grafana save its internal
+        # system files in its own sqlite
         volumes:
             - grafana_data:/var/lib/grafana # where grafana save its raw data files, with this evry time docker restatrt grafana can remember you and everything you did in it
             - ./config/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml  # injects the datasource configuration file into grafana, this file tell grafana how to connect to our postgres database
