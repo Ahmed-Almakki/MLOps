@@ -1,9 +1,13 @@
 import pickle
+from io import BytesIO
+from pathlib import Path
+
 import pandas as pd
 import requests
-from io import StringIO
 
-with open("model.bin", "rb") as f:
+BASE_DIR = Path(__file__).resolve().parent
+
+with open(BASE_DIR / "model.bin", "rb") as f:
     dv, model = pickle.load(f)
 
 
@@ -11,7 +15,8 @@ with open("model.bin", "rb") as f:
 
 def read_data(filename, categorical):
     response = requests.get(filename)
-    df = pd.read_parquet(StringIO(response.content.decode('utf-8')))
+    response.raise_for_status()
+    df = pd.read_parquet(BytesIO(response.content))
     df['duration'] = df.tpep_dropoff_datetime - df.tpep_pickup_datetime
     df['duration'] = df.duration.dt.total_seconds() / 60
 
@@ -25,7 +30,11 @@ def read_data(filename, categorical):
 def main(year, month):
     categorical = ['PULocationID', 'DOLocationID']
 
-    df = read_data(f'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{year}-{month}.parquet', categorical)
+    df = read_data(
+        f'https://d37ci6vzurychx.cloudfront.net/trip-data/'
+        f'yellow_tripdata_{year}-{month:02d}.parquet',
+        categorical
+    )
 
     dicts = df[categorical].to_dict(orient='records')
     X_val = dv.transform(dicts)
@@ -42,8 +51,7 @@ if __name__ == "__main__":
     print(f"Processing data for year: {year}, month: {month}...")
     result = main(year, month)
     print(f"Average predicted duration: {result:.2f} minutes")
-    output_file = f'taxi_type=yellow_year={year:04d}_month={month:02d}.parquet'
+    output_file = BASE_DIR / f'taxi_type=yellow_year={year:04d}_month={month:02d}.parquet'
     print(f"Saving results to {output_file}...")
     pd.DataFrame({'predicted_duration': [result]}).to_parquet(output_file, index=False)
     print("Done.")
-
