@@ -34,4 +34,9 @@ df_input.to_parquet(
     storage_options=options
 )
 
-print("Input data has been written to S3-compatible storage.")
+os.system('python batch.py 2023 1')
+output_file = 's3://nyc-duration/out/2023-01.parquet'
+df_output = pd.read_parquet(output_file, storage_options=options)
+print("df_output:", df_output.info())
+
+print(f"Sum of predicted durations: {df_output['predicted_duration'].sum():.2f} minutes")
